@@ -5,21 +5,13 @@ import unittest
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from api import ModelError, default_config
+from api import ModelError, default_config, simulate
 from config import validate_config, wse_config
 from frontend.capture import TraceAdapter
 from simulator import Simulator
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / 'workspace/ssnpu-components/tests'
-
-
-def simulate(capture_dir, config=None, *, communication_plan=None):
-    """Drive the simulator with synthetic unit-test records."""
-    if config is None:
-        config = wse_config() if communication_plan is not None else default_config()
-    config = validate_config(copy.deepcopy(config))
-    return Simulator(TraceAdapter(capture_dir, config, communication_plan), config).run()
 
 
 def tile(oid, producer, shape=(1, 4), version=1, shared=False, handle=None):

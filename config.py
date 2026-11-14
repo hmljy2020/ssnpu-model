@@ -161,3 +161,9 @@ def validate_wse(c):
         raise ModelError('No flit payload capacity')
     if c['engines']['shared_write'].get('dtype_overrides'):
         raise ModelError('WSE reservations require one dtype-independent shared write service')
+
+def platform_spec(config):
+    """Only network clocks/rates and declared endpoint write service cross over."""
+    return dict(network={k: v['value'] for k, v in config['wse'].items() if not k.startswith('sram_')},
+                write_service={k: config['engines']['shared_write'][k] for k in ('throughput', 'latency')},
+                endpoint_command_cycles=1, reservation_roundtrip_cycles=4)

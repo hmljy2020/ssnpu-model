@@ -13,7 +13,7 @@ from tiles import nbytes, version_key
 
 class TraceAdapter:
     """Capture v2 / SSNPU v1 boundary; order edges only establish age."""
-    def __init__(self, capture_dir, config, communication_plan=None, *, require_pto=False):
+    def __init__(self, capture_dir, config, communication_plan=None):
         self.path, self.config = Path(capture_dir), config
         self.instructions, self.versions = {}, {}
         self.source_hashes = {}
@@ -24,12 +24,6 @@ class TraceAdapter:
         if manifest.get('complete') is not True:
             raise ModelError('Capture is incomplete')
         self.capture_config = self.read(manifest['config_file']) if manifest.get('config_file') else {}
-        if require_pto and (
-            self.capture_config.get('capture_trace') is not True
-            or self.capture_config.get('mode') not in ('trace_only', 'functional')
-            or not self.capture_config.get('entry')
-        ):
-            raise ModelError('Expected a PyPTO workload capture with trace metadata')
         self.objects = self.read(manifest['objects_file'])
         self.tasks = self.read(manifest['tasks_file'])
         events = self.lines(manifest['events_file'])
@@ -51,8 +45,6 @@ class TraceAdapter:
                 raise ModelError(f'Operation count mismatch: {identity}')
             previous = None
             for sequence, r in enumerate(records):
-                if require_pto and ('pto_op' not in r or not r.get('function')):
-                    raise ModelError(f'Missing PyPTO trace metadata at operation {r["op_id"]}')
                 if tuple(r[k] for k in ('task_id', 'block_id', 'subblock_id', 'thread_id')) != identity:
                     raise ModelError(f'Thread identity mismatch: {r["op_id"]}')
                 if r['instance_op_sequence'] != sequence:

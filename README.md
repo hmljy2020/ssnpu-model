@@ -18,7 +18,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -S -m unittest discover -s tests 
 
 FlashAttention 示例读取 PyPTO 导出的指令流，按指定硬件配置和通信计划回放，并输出时序报告与流水图。[FA 回放命令](examples/decode/README.md)
 
-Python 3.11+、仅标准库。公共回放入口读取 PyPTO 导出的 workload capture v2 / SSNPU v1，采用独立组件、消息队列和周期驱动。每 Core 建立 Scheduler、ROB、TileReg、TLSU、Sync，每 PE 建立 Cube、Vector。Core 间资源独立，PE 数默认 4。参数用于逻辑验证，尚未校准硬件周期精度。
+Python 3.11+、仅标准库。公共回放入口读取静态 workload capture v2 / SSNPU v1（手写或 PyPTO 导出），采用独立组件、消息队列和周期驱动。每 Core 建立 Scheduler、ROB、TileReg、TLSU、Sync，每 PE 建立 Cube、Vector。Core 间资源独立，PE 数默认 4。参数用于逻辑验证，尚未校准硬件周期精度。
 
 从仓库根目录执行，所有新产物写入仓内 `workspace/`：
 
@@ -115,3 +115,5 @@ Simulator 将指令派给 Cube、Vector、TLSU，各单元内部实现自己的�
 [从 gfrun 捕获 PTO tile trace](docs/gfrun-tile-trace.md) 记录同一 ELF 驱动两套性能模型的备选路线、标准紧凑格式需要补充的运行时信息，以及当前目标编译工具链尚未就绪的限制。
 
 [SSM 完整 benchmark 结果](docs/benchmarks/ssm-native-results.md) 和 [首轮参数校准](docs/benchmarks/ssm-calibration.md) 包含单 PE 固定用例的周期、可选校准配置与复现命令。`benchmarks/ssm_baseline.py --timeout 0` 支持无时间限制运行；`benchmarks/calibrate_ssm.py` 可基于已保存的 SSM 结果重做拟合。
+
+[核与 NoC 独立运行](docs/DECOUPLING.md) 说明 simulate_core、假通信后端、假核端点和联合运行的职责边界。

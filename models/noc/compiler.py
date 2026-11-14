@@ -5,7 +5,7 @@ from bisect import bisect_left, insort
 from collections import defaultdict
 from fractions import Fraction
 
-from models.noc.protocol import digest
+from runtime.communication import digest
 from models.noc.routing import node_id, integer, multicast_routes, route_tree, transmissions, receive_offset
 from errors import ModelError
 

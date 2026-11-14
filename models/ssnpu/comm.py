@@ -4,7 +4,7 @@ from collections import Counter
 from runtime.component import Component
 from runtime.protocol import (Dispatch, Complete, Consumed, Access, AccessDone, ReceivePrepare,
                        PortFence, WriteReservations, RouterWrite, PublishReceive, TransferReply, core_name)
-from models.noc.protocol import (Accepted, Rejected, Completion, DataCommand, DataReply, request_from_dict)
+from runtime.communication import (Accepted, Rejected, Completion, DataCommand, DataReply, request_from_dict)
 from errors import ModelError
 
 

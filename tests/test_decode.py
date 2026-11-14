@@ -40,10 +40,9 @@ class DecodeReplayTests(unittest.TestCase):
         self.assertTrue((output / 'pipeline.pftrace').stat().st_size)
         self.assertFalse((output / 'capture').exists())
 
-    def test_public_replay_rejects_synthetic_records(self):
+    def test_public_replay_accepts_synthetic_records(self):
         path = fixture(self.path / 'synthetic', [op(0)])
-        with self.assertRaisesRegex(ModelError, 'Expected a PyPTO workload capture'):
-            simulate(path)
+        self.assertEqual(simulate(path)['instruction_count'], 1)
 
     def test_hbm_arbitration_and_bandwidth(self):
         # Two cores each copy 128 FP16 elements from HBM to local SRAM.

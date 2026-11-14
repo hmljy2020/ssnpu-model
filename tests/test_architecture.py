@@ -39,7 +39,7 @@ class ArchitectureTests(unittest.TestCase):
                                 self.assertFalse(name.startswith(('models.ssnpu',
                                                                   'models.memory')))
                             if path.is_relative_to(PACKAGE / 'models/ssnpu') and name.startswith('models.noc'):
-                                self.assertEqual(name, 'models.noc.protocol')
+                                self.fail('Core imports NoC implementation: ' + name)
 
     def test_noc_import_does_not_load_core_or_capture(self):
         # A fresh standard-library-only process catches transitive __init__ imports.

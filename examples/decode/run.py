@@ -9,7 +9,7 @@ from analysis.pipeline import export_pipeline, export_resource_trace
 from analysis.perfetto import to_pftrace, to_perfetto
 from errors import ModelError
 from frontend.capture import TraceAdapter
-from models.noc.protocol import platform_spec
+from config import platform_spec
 
 
 def export_communication(trace, output):
@@ -47,7 +47,7 @@ def main(argv=None):
     output = args.output_dir
     output.mkdir(parents=True, exist_ok=True)
     if 'communication_installation' in report:
-        trace = TraceAdapter(args.capture_dir, report['config'], args.communication_plan, require_pto=True)
+        trace = TraceAdapter(args.capture_dir, report['config'], args.communication_plan)
         export_communication(trace, output)
     cycle_ns = 1e9/config['wse']['core_clock_hz']['value']
     (output/'pipeline.pftrace').write_bytes(to_pftrace(report['instruction_events'], cycle_ns=cycle_ns))

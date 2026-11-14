@@ -1,83 +1,37 @@
-"""Composition root: construct, clock, diagnose and report components."""
-import json
-
-from runtime.clock import Clock
-from models.ssnpu.comm import CommPort
-from models.noc.protocol import platform_spec
-from models.ssnpu import Cube, Vector, TLSU, ROB, Scheduler, Sync, TileReg
-from runtime.protocol import core_name, unit_name
+"""Compose independent core and network components with a common runner."""
+from config import platform_spec
 from errors import ModelError
-from analysis.report import build_report
+from models.ssnpu.system import build_components
+from runtime.runner import Runner
 
 
-class Simulator:
-    """模型装配与时钟循环；具体发射、执行和释放由各组件自己推进。"""
-    def __init__(self, trace, config, tick_order=None):
+class Simulator(Runner):
+    def __init__(self, trace, config, tick_order=None, *, core_only=False, comm_backend=None):
         self.trace, self.config = trace, config
         self.nodes = trace.instructions
-        self.components = {}
-        cores = sorted({i.core for i in self.nodes.values()})
-        subscribers = [core_name(c, unit) for c in cores for unit in ('scheduler', 'sync')]
-        # 每个 ROB 向所有 Core 的 Scheduler/Sync 广播，跨 Core 的 task 依赖也能唤醒。
-        for core in cores:
-            nodes = {k: i for k, i in self.nodes.items() if i.core == core}
-            real = [i for i in nodes.values() if not i.control]
-            control = [i for i in nodes.values() if i.control]
-            for unit, component in (
-                ('scheduler', Scheduler(core_name(core, 'scheduler'), real, config)),
-                ('rob', ROB(core_name(core, 'rob'), list(nodes.values()), subscribers,
-                            config['parameters'].get('rob_depth', {}).get('value'))),
-                ('tile', TileReg(core_name(core, 'tile'), nodes, trace.versions, config)),
-                ('sync', Sync(core_name(core, 'sync'), control, config)),
-                ('comm', CommPort(core_name(core, 'comm'),
-                    {i.id: i for i in real if unit_name(i) == core_name(core, 'comm')})),
-                ('tlsu', TLSU(core_name(core, 'tlsu'),
-                            {i.id: i for i in real if unit_name(i) == core_name(core, 'tlsu')}, config)),
-            ):
-                self.components[core_name(core, unit)] = component
-            for pe in range(config['parameters']['pe_count']['value']):
-                for unit, cls in (('cube', Cube), ('vector', Vector)):
-                    name = core_name(core, f'pe:{pe}/{unit}')
-                    self.components[name] = cls(name, {i.id: i for i in real if unit_name(i) == name}, config)
+        components = build_components(trace, config)
         self.noc = None
         self.hbm = None
-        if 'hbm' in config:
+        if core_only:
+            if 'hbm' in config:
+                raise ModelError('simulate_core requires a core configuration without HBM')
+            if any(i.raw['ir_op'].startswith('comm.') for i in self.nodes.values()) and comm_backend is None:
+                raise ModelError('Core communication instructions require comm_backend')
+        elif 'hbm' in config:
             from models.memory.hbm import HBM
             self.hbm = HBM(config)
-            self.components['hbm'] = self.hbm
-        if trace.calendar_phases:
+            components['hbm'] = self.hbm
+        if comm_backend is not None:
+            components['communit'] = comm_backend
+        elif not core_only and trace.calendar_phases:
             from models.noc.unit import CommUnit
             self.noc = CommUnit(trace.comm_installation, platform_spec(config))
-            self.components['communit'] = self.noc
-        self.clock = Clock(self.components, config.get('message_log', False))
-        self.tick_order = list(tick_order) if tick_order is not None else sorted(self.components)
-        if len(self.tick_order) != len(self.components) or set(self.tick_order) != set(self.components):
-            raise ValueError('tick_order must contain each component exactly once')
-        self.cycle = 0
-
-    def snapshot(self):
-        return {'cycle': self.cycle, 'messages_in_flight': len(self.clock.pending),
-                'components': {name: c.snapshot() for name, c in sorted(self.components.items())}}
+            components['communit'] = self.noc
+        backend = components.get('communit')
+        super().__init__(components, message_log=config.get('message_log', False),
+                         advance=getattr(backend, 'advance', None), tick_order=tick_order)
 
     def run(self):
-        while True:
-            before = sum(c.progress for c in self.components.values())
-            if self.noc is not None:
-                for destination, message, time_ns in self.noc.advance(self.cycle):
-                    self.clock.external(destination, message, self.cycle, time_ns)
-            # 固定周期协议：交付上一拍消息 → 每组件运行一次 → 收集本拍新消息。
-            # collect 之前不会交付新消息，因此调整组件调用顺序不会产生同拍旁路。
-            self.clock.deliver(self.cycle)
-            for name in self.tick_order:
-                self.components[name].tick(self.cycle)
-            self.clock.collect(self.cycle)
-            # 完成不只看计算结束：还必须等退休、消费通知及所有在途消息处理完。
-            if not self.clock.pending and all(c.is_idle() for c in self.components.values()):
-                return build_report(self)
-            progress = sum(c.progress for c in self.components.values()) > before
-            future = any(c.next_event() is not None for c in self.components.values())
-            # 无本地进展、无未来服务事件、无在途消息，才判为无法自行恢复的停滞。
-            if not progress and not future and not self.clock.pending:
-                raise ModelError('Deadlock at cycle ' + str(self.cycle) + ': ' +
-                                 json.dumps(self.snapshot(), sort_keys=True))
-            self.cycle += 1
+        super().run()
+        from analysis.report import build_report
+        return build_report(self)

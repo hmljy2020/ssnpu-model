@@ -3,16 +3,17 @@
 Each client prepares its buffers, submits at a different cycle, does independent
 work after acceptance, waits on its token, then consumes the published bytes.
 """
+from config import platform_spec
 import argparse
 from dataclasses import asdict
 import json
 from pathlib import Path
 
-from runtime.clock import Clock
+from runtime.runner import Runner
 from runtime.component import Component
 from models.noc.compiler import compile_phase, make_installation
-from models.noc.protocol import (
-    Accepted, Rejected, Completion, CommRequest, DataRange, DataCommand, DataReply, platform_spec)
+from runtime.communication import (
+    Accepted, Rejected, Completion, CommRequest, DataRange, DataCommand, DataReply)
 from models.noc.unit import CommUnit
 from config import wse_config
 
@@ -124,6 +125,14 @@ class ByteClient(Component):
             self.consumed = True
             self.log('consume')
 
+    def next_event(self):
+        events = [when for when, _, _ in self.pending]
+        if self.accepted is None:
+            events.append(self.submit_cycle)
+        if self.wait_cycle is not None:
+            events.append(self.wait_cycle)
+        return min((t for t in events if t > self.cycle), default=None)
+
     def is_idle(self):
         return super().is_idle() and self.consumed and not self.pending
 
@@ -162,18 +171,8 @@ def build_demo(members=(0, 1, 9), shard_bytes=64, rounds=2):
 def run_demo(members=(0, 1, 9), shard_bytes=64, rounds=2):
     unit, clients, sources = build_demo(members, shard_bytes, rounds)
     components = dict(clients, communit=unit)
-    clock = Clock(components)
-    for cycle in range(100000):
-        for destination, message, when in unit.advance(cycle):
-            clock.external(destination, message, cycle, when)
-        clock.deliver(cycle)
-        for name in sorted(components):
-            components[name].tick(cycle)
-        clock.collect(cycle)
-        if not clock.pending and all(c.is_idle() for c in components.values()):
-            break
-    else:
-        raise RuntimeError('Standalone driver failed to drain')
+    runner = Runner(components, advance=unit.advance)
+    cycle = runner.run()
     for client in clients.values():
         expected = b''.join(sources[client.request.domain, node] for node in members)
         if bytes(client.destination) != expected:
