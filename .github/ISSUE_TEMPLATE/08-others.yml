@@ -1,0 +1,29 @@
+name: "[Others]"
+description: 前三类之外的工程、工具和仓库维护
+title: "[Others] "
+labels: ["Others"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        标题格式为 `[分类] 简洁描述`，联合分类按 Workload → Core → NoC 排列，Others 单独使用。
+        本模板已预填分类。需要更换分类组合时，请选择对应模板；提交后修改分类时同步更新标题与 Labels。
+  - type: textarea
+    id: context
+    attributes:
+      label: 背景与目标
+      description: 说明场景，以及希望解决的问题或达到的效果。
+    validations:
+      required: true
+  - type: textarea
+    id: discussion
+    attributes:
+      label: 问题或方案
+      description: 写清楚当前行为、预期行为或建议方案；尚未确定的内容可以列为待讨论问题。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 例子与验证
+      description: 按需补充代码、复现步骤、版本、结果或链接；设计讨论可描述计划如何验证。
