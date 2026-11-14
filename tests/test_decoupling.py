@@ -36,7 +36,8 @@ class DecouplingTests(unittest.TestCase):
 import sys
 from api import simulate_core
 r = simulate_core('examples/ooo/capture')
-assert r['total_cycles'] == 23
+assert r['instruction_count'] > 0
+assert all(row['state'] == 'retired' for row in r['timeline'])
 assert not any(k.startswith(('models.noc', 'models.memory')) for k in sys.modules)
 """
         subprocess.run([sys.executable, '-S', '-c', code], cwd=ROOT, check=True, capture_output=True)

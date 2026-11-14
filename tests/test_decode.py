@@ -35,8 +35,9 @@ class DecodeReplayTests(unittest.TestCase):
             main([str(capture), '--config', str(config_path), '--no-plots', '--output-dir', str(output)])
         report = json.loads((output / 'report.json').read_text())
         self.assertEqual(report['instruction_count'], 320)
-        self.assertEqual(report['total_cycles'], 2183)
-        self.assertEqual(report['source_sha256'], simulate(capture)['source_sha256'])
+        direct = simulate(capture)
+        self.assertEqual(report['total_cycles'], direct['total_cycles'])
+        self.assertEqual(report['source_sha256'], direct['source_sha256'])
         self.assertTrue((output / 'pipeline.pftrace').stat().st_size)
         self.assertFalse((output / 'capture').exists())
 

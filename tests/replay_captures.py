@@ -1,6 +1,7 @@
 """Replay real captures and independently audit the exported schedule."""
 import argparse
 import json
+from collections import Counter
 from pathlib import Path
 from api import default_config, simulate
 from frontend.capture import TraceAdapter
@@ -26,12 +27,17 @@ for capture in args.captures:
         for stage in row['stages']:
             assert stage['complete'] > stage['start']
     (out / f'{name}.json').write_text(json.dumps(report, indent=2, allow_nan=False) + '\n')
+    waits = Counter()
+    for counts in report['wait_reason_sets'].values():
+        waits.update(counts)
     summary.append(dict(capture=name, instructions=report['instruction_count'],
                         cycles=report['total_cycles'],
                         last_instruction_complete_cycle=report['last_instruction_complete_cycle'],
                         last_node_complete_cycle=report['last_node_complete_cycle'],
                         core_completion=report['core_completion'],
                         storage_peak_bytes=report['storage_peak_bytes'],
+                        top_wait_reason_sets=waits.most_common(10),
+                        internal_stage_resource_wait_cycles=sum(report['internal_stage_resource_wait_cycles'].values()),
                         rob_windows=report['rob_windows'],
                         audit='PASS: unique instructions, dependencies, issue limits, resource intervals, '
                               'operand handshakes, admission windows, retirement, capacity and exact allocation/free lifetimes'))

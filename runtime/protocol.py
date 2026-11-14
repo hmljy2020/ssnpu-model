@@ -13,13 +13,13 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Admitted:
-    """ROB → Scheduler：已占用线程窗口槽位，下一拍可开始检查依赖。"""
+    """ROB → Scheduler：已占用线程窗口槽位，下一拍可按序申请输出预留。"""
     instruction: object
 
 
 @dataclass(frozen=True)
 class Allocate:
-    """Scheduler → TileReg：为该指令一次性预留全部输出空间。"""
+    """Scheduler → TileReg：按线程顺序发送，一次性预留全部输出空间。"""
     instruction: object
     request: str
 

@@ -43,16 +43,13 @@ class TileReg(Component):
                 self.release(vk)
                 self.ready.discard(vk)
 
-    def release(self, key, superseded_by=None):
+    def release(self, key):
         if key not in self.active:
             return
         self.active.remove(key)
         v = self.versions[key]
         self.usage[v.pool] -= v.size
-        event = dict(cycle=self.cycle, action='free', version=list(key), pool=v.pool, bytes=v.size)
-        if superseded_by is not None:
-            event['superseded_by'] = superseded_by
-        self.storage_events.append(event)
+        self.storage_events.append(dict(cycle=self.cycle, action='free', version=list(key), pool=v.pool, bytes=v.size))
 
     def allocate(self, instruction):
         if instruction.raw['ir_op'] == 'comm.submit':
@@ -60,28 +57,15 @@ class TileReg(Component):
         # Submit reserves the wait producer's output; wait must not allocate it twice.
         if instruction.raw['ir_op'] == 'comm.wait' and instruction.outputs <= self.active:
             return None
-        # 先计算全部输出所需容量和可替换旧版本，所有检查通过后才修改状态（原子预留）。
-        delta, replace = Counter(), set()
+        # 所有动态版本独立占容量；全部输出检查通过后才原子预留。
+        delta = Counter()
         for key in sorted(instruction.outputs, key=str):
             v = self.versions[key]
-            for old in sorted(self.active, key=str):
-                ov = self.versions[old]
-                if ov.slot == v.slot and old != key:
-                    # 固定槽位覆写必须等旧生产者和其他读者完成。
-                    # 排除当前指令自身，允许读旧值、写新值的原地操作。
-                    if ov.retained or ov.producer not in self.done or not (ov.consumers - {instruction.id}) <= self.done:
-                        return f'fixed_position:{old}'
-                    replace.add(old)
             delta[v.pool] += v.size
-        for old in replace:
-            delta[self.versions[old].pool] -= self.versions[old].size
         for pool, amount in delta.items():
             limit = self.config['parameters']['shared_capacity' if pool.endswith('/shared') else 'local_capacity']['value']
             if self.usage[pool] + amount > limit:
                 return f'capacity:{pool}'
-        for key in sorted(replace, key=str):
-            # 原地替换只转移容量归属；旧版本的 ready 仍保留，供该指令先读旧值。
-            self.release(key, superseded_by=instruction.id)
         for key in sorted(instruction.outputs, key=str):
             v = self.versions[key]
             self.active.add(key)
@@ -221,17 +205,24 @@ class TileReg(Component):
             if end <= cycle:
                 self.respond(request)
                 self.running.remove((request, end))
-        # 3. 尝试各输出分配请求；容量不足时留在队列，允许后续可满足的请求继续尝试。
+        # 3. 同线程按序分配，受阻后禁止年轻申请抢占；其他线程仍可推进。
+        # 同拍可连续满足多个请求，不增加逐条消息往返的吞吐限制。
         self.blocked = {}
-        for request in list(self.allocations):
+        blocked_threads = {}
+        for request in sorted(self.allocations, key=lambda r: (self.nodes[r.instruction].task,
+                                                               self.nodes[r.instruction].age,
+                                                               str(r.instruction))):
             i = self.nodes[request.instruction]
-            reason = self.allocate(i)
+            thread = i.raw['_identity']
+            reason = (f'waiting_prior_allocation:{blocked_threads[thread]}' if thread in blocked_threads
+                      else self.allocate(i))
             if reason:
+                blocked_threads.setdefault(thread, i.id)
                 self.blocked[str(i.id)] = reason
                 self.waits[str(i.id)][reason] += 1
                 continue
             # TileReg → Scheduler：Allocated 携带原请求 ID，允许该指令进入待派发状态。
-            # 原地写指令随后仍可读取保留的旧版本 ready；新输出要等实际写回才 ready。
+            # 预留不发布 ready；Scheduler 仍须等待数据和同步依赖。
             self.send(core_name(i.core, 'scheduler'), Allocated(i.id, request.request), 'allocation')
             self.allocations.remove(request)
         # 4. 按确定性交付顺序仲裁访问；未 ready 的读请求可被绕过，读写端口彼此独立。

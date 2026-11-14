@@ -6,10 +6,10 @@ from runtime.protocol import Admitted, Allocate, Allocated, Completed, Dispatch,
 
 
 class Scheduler(Component):
-    """waiting_admission → waiting_dependencies → allocation_pending → dispatch_ready → issued。
+    """waiting_admission → waiting_allocation → allocation_pending → dispatch_ready → issued。
 
     只管理依赖、输出预留和派发；执行单元收到命令后自行等待端口/计算资源。
-    pending 按原始年龄排序，但会跳过未就绪指令，实现 tile 粒度乱序发射。
+    按线程程序顺序申请输出，预留完成后跳过数据未就绪指令，实现乱序发射。
     """
     def __init__(self, name, instructions, config):
         super().__init__(name)
@@ -19,6 +19,7 @@ class Scheduler(Component):
         self.done = set()
         self.config, self.rotation = config, 0
         self.waits = defaultdict(Counter)
+        self.blocked = {}
 
     def tick(self, cycle):
         # 1. 接收上一拍的反馈。Admitted/Completed 来自 ROB；Allocated 来自 TileReg。
@@ -26,8 +27,8 @@ class Scheduler(Component):
             if isinstance(message, Admitted):
                 # 只有 ROB 准入通知能打开窗口；记录接收周期，与 ROB 的准入周期区分。
                 assert self.status[message.instruction] == 'waiting_admission'
-                self.status[message.instruction] = 'waiting_dependencies'
-                self.observe(message.instruction, admission_received=cycle, state='waiting_dependencies')
+                self.status[message.instruction] = 'waiting_allocation'
+                self.observe(message.instruction, admission_received=cycle, state='waiting_allocation')
             elif isinstance(message, Completed):
                 self.done.add(message.instruction)
             elif isinstance(message, Allocated):
@@ -37,11 +38,21 @@ class Scheduler(Component):
                 self.observe(message.instruction, allocated=cycle, state='dispatch_ready')
             else:
                 raise TypeError(message)
-        # 2. 数据依赖与同步依赖都满足后申请输出容量；状态切换保证请求只发送一次。
+        # 2. 同线程按序发送一次性分配请求，不等数据或前一条 Allocated 往返。
+        # 同步边仍限制跨阶段预留；TileReg 负责容量阻塞后的线程内排队。
+        self.blocked = {}
+        blocked_threads = {}
         for i in self.pending:
-            if self.status[i.id] == 'waiting_dependencies' and (i.deps | i.sync) <= self.done:
+            state, thread = self.status[i.id], i.raw['_identity']
+            if state not in ('waiting_admission', 'waiting_allocation'):
+                continue
+            if thread in blocked_threads:
+                self.blocked[i.id] = f'waiting_prior_allocation:{blocked_threads[thread]}'
+            elif state == 'waiting_admission' or not i.sync <= self.done:
+                blocked_threads[thread] = i.id
+            else:
                 if i.alias:
-                    # view 使用既有存储，不申请新容量；仍经 Dispatch/Complete 消息完成。
+                    # view 不占新容量；派发时仍检查真实数据及同步依赖。
                     self.status[i.id] = 'dispatch_ready'
                 else:
                     self.status[i.id] = 'allocation_pending'
@@ -53,7 +64,7 @@ class Scheduler(Component):
         pe_width = self.config['parameters']['pe_issue_width']['value']
         core_width = self.config['parameters']['core_issue_width']['value']
         # 3. 每轮每 PE 最多派发一条，多轮填满本周期额度；每拍轮换起始 PE。
-        # ready 从按年龄排列的 pending 中筛选，旧指令等依赖/容量时可被年轻指令绕过。
+        # 完成预留且依赖就绪的命令参与仲裁；旧指令等数据时可被年轻指令绕过。
         # 无限命令队列允许提前派发；issue_width 限制派发数，计算吞吐由执行单元限制。
         progress = True
         while progress:
@@ -61,6 +72,7 @@ class Scheduler(Component):
             for offset in range(n):
                 pe = (self.rotation + offset) % n
                 ready = next((i for i in self.pending if i.pe == pe and self.status[i.id] == 'dispatch_ready'
+                              and (i.deps | i.sync) <= self.done
                               and (i.alias or (counts[pe] < pe_width and core_count < core_width))), None)
                 if ready is None:
                     continue
@@ -79,22 +91,31 @@ class Scheduler(Component):
         # 4. 已派发命令移交执行单元；只对仍未派发的指令记录本拍等待原因。
         self.pending = [i for i in self.pending if self.status[i.id] != 'issued']
         for i in self.pending:
-            if self.status[i.id] == 'waiting_admission':
-                # 窗口外仅计准入等待，不提前参与依赖检查或输出容量申请。
-                self.waits[str(i.id)]['waiting_admission'] += 1
-                continue
-            reasons = []
-            if not i.deps <= self.done:
-                reasons.append('dependency')
-            if not i.sync <= self.done:
-                reasons.append('synchronization')
-            reasons.append(self.status[i.id] if self.status[i.id] != 'dispatch_ready' else 'issue_width')
-            self.waits[str(i.id)]['|'.join(sorted(reasons))] += 1
+            self.waits[str(i.id)]['|'.join(self.wait_reasons(i))] += 1
         self.rotation = (self.rotation + 1) % n
+
+    def wait_reasons(self, i):
+        state = self.status[i.id]
+        if state == 'waiting_admission':
+            return ['waiting_admission']
+        reasons = []
+        if not i.deps <= self.done:
+            reasons.append('dependency')
+        if not i.sync <= self.done:
+            reasons.append('synchronization')
+        if i.id in self.blocked:
+            reasons.append(self.blocked[i.id])
+        if state == 'allocation_pending':
+            # 具体容量或前序阻塞由 TileReg 的 waits/snapshot 提供。
+            reasons.append(state)
+        elif state == 'dispatch_ready' and not reasons:
+            reasons.append('issue_width')
+        return sorted(reasons)
 
     def is_idle(self):
         return super().is_idle() and not self.pending
 
     def snapshot(self):
         return dict(super().snapshot(), waiting={str(i.id): dict(state=self.status[i.id],
+                    reasons=self.wait_reasons(i),
                     dependencies=sorted(map(str, (i.deps | i.sync) - self.done))) for i in self.pending})

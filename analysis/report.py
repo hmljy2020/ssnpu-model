@@ -93,7 +93,11 @@ def build_report(sim):
             'Ordered operand handshakes; ready commands arbitrate independently by age.',
             'Private TileReg service included in compute cost; message round trips remain.',
             'Shared reads charged separately per consumer; no broadcast combining.',
-            'Outputs atomically reserved before dispatch; fixed slots await prior readers.',
+            'Outputs atomically reserved in thread order before data readiness; synchronization gates reservations.',
+            'Reserved instructions dispatch out of order after data and synchronization dependencies complete.',
+            'Local and Shared dynamic versions occupy independent capacity; no in-place capacity transfer.',
+            'Local release waits for producer and all consumers to complete; this is a coarse approximation, '
+            'not the full SSM retirement and early-release model.',
             'Views use messages without tile quota or new storage; reuse-only shared versions remain live-out.',
             'Completion broadcasts do not wait for in-order thread retirement.',
             'Total cycles include retirement, consumption and message drain.',
