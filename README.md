@@ -1,5 +1,7 @@
 # wse-perf-sim
 
+[Issue 分类与提交格式](CONTRIBUTING.md)
+
 纯 Python WSE 性能仿真器，包含超标量 NPU 核、Calendar NoC（片上网络）和 HBM（高带宽内存）模型。每核的 NoC 端点是 SharedTileReg，SRAM 作为核内存储。支持 PyPTO capture 导入、显式通信计划、Decode 时序模拟和时间线导出。
 
 代码按职责分层，核模型、NoC 和 HBM 位于 `models/` 下的平级目录。PTO capture 导入在 `frontend/`，报告和绘图在 `analysis/`。完整目录、依赖边界及旧路径对照见 [项目结构](docs/STRUCTURE.md)。
