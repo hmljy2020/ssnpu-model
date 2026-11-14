@@ -121,11 +121,7 @@ def audit(report, trace):
             assert not version.retained
             assert rows[version.producer]['complete'] <= e['cycle']
             for reader in version.consumers:
-                if rows[reader]['complete'] > e['cycle']:
-                    assert version.pool.endswith('/shared')
-                    assert e.get('superseded_by') == reader
-                    assert rows[reader]['allocation_request'] < e['cycle'] < rows[reader]['issue']
-                    assert any(trace.versions[k].slot == version.slot for k in trace.instructions[reader].outputs)
+                assert rows[reader]['complete'] <= e['cycle']
         else:
             key = tuple(e['version'])
             assert key not in allocated
@@ -278,8 +274,8 @@ class ModelTests(ModelTestCase):
         rows[-1]['ssnpu']['shared_inputs'] = [dict(use_id='read2', operand=0, version_id='v11', handle_id='h0', participants=[0], retention='last-use')]
         r, t = self.run_rows(rows)
         self.assertEqual(t[10]['stages'], [])
-        self.assertEqual(r['storage_peak_bytes']['core:0/shared'], 16)
-        self.assertGreaterEqual(t[11]['issue'], max(t[k]['complete'] for k in range(1, 5)))
+        self.assertEqual(r['storage_peak_bytes']['core:0/shared'], 32)
+        self.assertLess(t[11]['issue'], max(t[k]['complete'] for k in range(1, 5)))
 
     def test_capacity_wait_and_recovery(self):
         self.c['parameters']['local_capacity']['value'] = 16

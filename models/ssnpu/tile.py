@@ -43,16 +43,13 @@ class TileReg(Component):
                 self.release(vk)
                 self.ready.discard(vk)
 
-    def release(self, key, superseded_by=None):
+    def release(self, key):
         if key not in self.active:
             return
         self.active.remove(key)
         v = self.versions[key]
         self.usage[v.pool] -= v.size
-        event = dict(cycle=self.cycle, action='free', version=list(key), pool=v.pool, bytes=v.size)
-        if superseded_by is not None:
-            event['superseded_by'] = superseded_by
-        self.storage_events.append(event)
+        self.storage_events.append(dict(cycle=self.cycle, action='free', version=list(key), pool=v.pool, bytes=v.size))
 
     def allocate(self, instruction):
         if instruction.raw['ir_op'] == 'comm.submit':
@@ -60,29 +57,15 @@ class TileReg(Component):
         # Submit reserves the wait producer's output; wait must not allocate it twice.
         if instruction.raw['ir_op'] == 'comm.wait' and instruction.outputs <= self.active:
             return None
-        # Local 每个动态版本独立占容量；仅 Shared 保留固定位置替换规则。
-        # 全部输出检查通过后才修改状态，失败不释放旧版本或部分预留。
-        delta, replace = Counter(), set()
+        # 所有动态版本独立占容量；全部输出检查通过后才原子预留。
+        delta = Counter()
         for key in sorted(instruction.outputs, key=str):
             v = self.versions[key]
-            for old in sorted(self.active, key=str) if v.pool.endswith('/shared') else ():
-                ov = self.versions[old]
-                if ov.slot == v.slot and old != key:
-                    # 固定槽位覆写必须等旧生产者和其他读者完成。
-                    # 排除当前指令自身，允许读旧值、写新值的原地操作。
-                    if ov.retained or ov.producer not in self.done or not (ov.consumers - {instruction.id}) <= self.done:
-                        return f'fixed_position:{old}'
-                    replace.add(old)
             delta[v.pool] += v.size
-        for old in replace:
-            delta[self.versions[old].pool] -= self.versions[old].size
         for pool, amount in delta.items():
             limit = self.config['parameters']['shared_capacity' if pool.endswith('/shared') else 'local_capacity']['value']
             if self.usage[pool] + amount > limit:
                 return f'capacity:{pool}'
-        for key in sorted(replace, key=str):
-            # 原地替换只转移容量归属；旧版本的 ready 仍保留，供该指令先读旧值。
-            self.release(key, superseded_by=instruction.id)
         for key in sorted(instruction.outputs, key=str):
             v = self.versions[key]
             self.active.add(key)

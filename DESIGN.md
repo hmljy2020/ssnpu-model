@@ -67,11 +67,13 @@ result = service_end + latency
 
 TileReg 是唯一可修改版本 ready、容量和消费者完成状态的组件。版本的完整消费者在加载时预先确定；普通版本在生产完成且所有消费者完成后释放，无消费者的输出在生产完成消息到达时释放。没有活跃读取请求并不等于可以释放。shared last-use 必须覆盖参与者并等待所有其他消费者；只有 reuse 的共享版本作为 live-out 保留。
 
-普通 Local 输出以 `(storage_id, version)` 为独立分配身份，同一 storage 的新旧版本可同时占用完整容量。适配器不再仅因 storage_id 相同增加覆盖依赖。读旧写新保留 RAW 依赖，输入旧版本和输出新版本分别计费；容量不足必须等待，不能提前扣除仍在使用的旧版本。view/reshape 链规范化到源版本，不重复分配。多输出预留保持原子性，失败不占据任何部分输出，也不释放旧版本。
+Local 和 Shared 输出统一以规范化后的动态版本为独立分配身份：Local 为 `(storage_id, version)`，Shared 为 `shared_version`。同一 storage 的新旧版本可同时占用完整容量，适配器不因 storage_id 或 shared handle 相同增加覆盖依赖，也不要求不同版本的跨线程生产者建立显式顺序。重复版本生产者仍报错，已有显式依赖、RAW 和同步依赖保留。读旧写新的输入旧版本和输出新版本分别计费；容量不足必须等待，不能扣除仍在使用或 retained 的旧版本。view/reshape 链规范化到源版本，不重复分配。多输出预留保持原子性，跨 Local/Shared 容量池也须全部检查成功后才分配。
 
 Local 的释放规则是粗粒度近似：生产者和全部消费者完成后回收，不等待 ROB 退休，也没有完整对齐 SSM 的退休和提前释放机制。issue #6 的 `A=full; B=relu(A); C=full; B=add(B,C)`，每 tile 为 1 KiB 时最后一步需要旧 B、C、新 B 三份空间；3 KiB 可完成，2 KiB 的容量不足不能通过隐式原地覆盖掩盖。
 
-Shared 保留发布、消费和释放规则。其固定位置后续写入仍等待旧生产者和其他读者，读旧写新的替换仍可产生带 `superseded_by` 的容量转移事件。适配器继续拒绝无序 Shared 固定位置写、非法 last-use / reuse、别名环、缺失生产者和图环。跨线程同 phase 的 Shared 固定位置写必须有显式顺序，shared handle 本身不强制复用物理 storage_id。
+Shared 保留发布、消费和释放规则：last-use 允许在生产者和全部消费者完成后回收；reuse 或没有 last-use 的版本继续作为 live-out 保留，即使同一 storage 已产生新版本也不释放。因此保留版本可能让后续分配持续等待并触发容量死锁。没有固定位置覆盖、容量转移和 `superseded_by` 事件。适配器继续校验 Shared 消费组、last-use / reuse、别名环、缺失生产者和图环。
+
+统一独立分配接近 SSM 容量充足时的新版本分配行为，但不实现 Shared 容量不足时的原地复用回退，也不实现新 PGI 提交时回收被替换映射的机制。NoC 路由和传输逻辑及现有通信绑定限制不变。
 
 ## 报告与停滞
 

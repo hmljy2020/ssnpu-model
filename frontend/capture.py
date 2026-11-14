@@ -91,7 +91,7 @@ class TraceAdapter:
         self.instructions[i.id] = i
 
     def _versions(self, real):
-        # view 解析到同一版本；Local 动态版本独立，只有 Shared 保留固定位置约束。
+        # view 解析到同一版本；Local/Shared 都以动态版本建立生产者和消费者。
         # 这些是静态元数据；运行时的 allocated/ready/释放状态由 TileReg 独立维护。
         aliases = {}
         for i in real:
@@ -119,10 +119,9 @@ class TraceAdapter:
                 if o['memory_space'] not in ('SharedTileReg', 'LocalTileReg'):
                     raise ModelError(f'Unsupported tile memory: {o["memory_space"]}')
                 pool = f'core:{i.core}/shared' if shared else f'core:{i.core}/pe:{i.pe}/local'
-                slot = (pool, o.get('storage_id', o['object_id'])) if shared else (pool, key)
                 if key in self.versions:
                     raise ModelError(f'Duplicate version producer: {key}')
-                self.versions[key] = Version(key, o, i.id, pool, slot, nbytes(o, o['shape']), retained=shared)
+                self.versions[key] = Version(key, o, i.id, pool, nbytes(o, o['shape']), retained=shared)
                 i.outputs.add(key)
         uses = defaultdict(list)
         for i in real:
@@ -175,31 +174,6 @@ class TraceAdapter:
                                (i.raw['_identity'] == end.raw['_identity'] and i.age < end.age)
                                for end, _ in terminal):
                         raise ModelError(f'Read after last-use or unordered lifetime: {key}')
-        slots = defaultdict(list)
-        for v in self.versions.values():
-            if v.pool.endswith('/shared'):
-                slots[v.slot].append(v)
-        # Shared fixed locations cannot be overwritten until all old readers finish.
-        # The overwriting instruction may itself read the old version in-place.
-        for versions in slots.values():
-            versions.sort(key=lambda v: (self.instructions[v.producer].task,
-                                         self.instructions[v.producer].raw['ssnpu']['phase'],
-                                         self.instructions[v.producer].age))
-            for old, new in zip(versions, versions[1:]):
-                older, newer = self.instructions[old.producer], self.instructions[new.producer]
-                if (older.task == newer.task and older.raw['ssnpu']['phase'] == newer.raw['ssnpu']['phase']
-                        and older.raw['_identity'] != newer.raw['_identity']):
-                    pending, seen = list(newer.deps | newer.sync), set()
-                    while pending:
-                        dep = pending.pop()
-                        if dep in seen or dep not in self.instructions:
-                            continue
-                        seen.add(dep)
-                        pending.extend(self.instructions[dep].deps | self.instructions[dep].sync)
-                    if older.id not in seen:
-                        raise ModelError(f'Unordered fixed-position writers: {old.key}, {new.key}')
-                writer = self.instructions[new.producer]
-                writer.deps.update(({old.producer} | old.consumers) - {writer.id})
 
     def _barriers(self, events, instances, real):
         # 把多线程同一轮 barrier 合并为一个控制节点，交给 Sync 执行。

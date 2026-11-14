@@ -95,7 +95,7 @@ def build_report(sim):
             'Shared reads charged separately per consumer; no broadcast combining.',
             'Outputs atomically reserved in thread order before data readiness; synchronization gates reservations.',
             'Reserved instructions dispatch out of order after data and synchronization dependencies complete.',
-            'Local dynamic versions occupy independent capacity; only Shared fixed slots await prior readers.',
+            'Local and Shared dynamic versions occupy independent capacity; no in-place capacity transfer.',
             'Local release waits for producer and all consumers to complete; this is a coarse approximation, '
             'not the full SSM retirement and early-release model.',
             'Views use messages without tile quota or new storage; reuse-only shared versions remain live-out.',

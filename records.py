@@ -29,7 +29,7 @@ class Instruction:
 
 @dataclass
 class Version:
-    """pool 决定容量域；Local slot 包含动态版本，Shared slot 保留固定位置语义。
+    """key 标识规范化后的动态版本，pool 决定独立计费的容量域。
 
     consumers 包含完整 trace 的消费者；retained 为真时消费结束仍保留载荷。
     """
@@ -37,7 +37,6 @@ class Version:
     obj: dict
     producer: object
     pool: str
-    slot: tuple
     size: int
     consumers: set = field(default_factory=set)
     retained: bool = False

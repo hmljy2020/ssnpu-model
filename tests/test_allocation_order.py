@@ -9,6 +9,100 @@ from test_model import ModelTestCase, fixture, op, tile
 
 
 class AllocationTests(ModelTestCase):
+    @staticmethod
+    def shared_use(row, version, retention='last-use'):
+        row['ssnpu']['shared_inputs'] = [dict(use_id=f'use:{row["op_id"]}', operand=0,
+            version_id=version, handle_id='h0', participants=[row['thread_id']], retention=retention)]
+        return row
+
+    def shared_generations(self, retention='last-use'):
+        source = op(0, outputs=[tile(0, 0, shared=True)])
+        reader = self.shared_use(op(1, inputs=source['outputs'], name='tile.exp'), 'v0', retention)
+        newer = op(2, outputs=[dict(tile(2, 2, shared=True), storage_id=0)], deps=[0])
+        consumer = self.shared_use(op(3, inputs=newer['outputs'], name='tile.add'), 'v2')
+        return [source, reader, newer, consumer]
+
+    def test_shared_versions_overlap_and_capacity_recovers_after_old_reader(self):
+        self.c['message_log'] = True
+        self.c['engines']['exp']['latency'] = 100
+        for capacity in (16, 32):
+            with self.subTest(capacity=capacity):
+                self.c['parameters']['shared_capacity']['value'] = capacity
+                report, rows = self.run_rows(self.shared_generations())
+                self.assertEqual(report['storage_peak_bytes']['core:0/shared'], capacity)
+                old_free, = [e for e in report['storage_events']
+                             if e['action'] == 'free' and e['version'] == ['shared', 'v0']]
+                self.assertEqual(old_free['cycle'], rows[1]['complete'] + 1)
+                reads = [m for m in report['messages']
+                         if m['type'] == 'Access' and m['instruction'] == 1 and not m['write']]
+                self.assertEqual([tuple(m['version']) for m in reads], [('shared', 'v0')])
+                if capacity == 32:
+                    self.assertLess(rows[2]['complete'], rows[1]['complete'])
+                else:
+                    self.assertGreater(rows[2]['allocated'], rows[1]['complete'])
+                    self.assertTrue(any('capacity:' in reason for reason in report['wait_reason_sets']['2']))
+
+    def test_shared_reuse_stays_live_and_does_not_prevent_fresh_version(self):
+        rows = self.shared_generations('reuse')
+        self.c['parameters']['shared_capacity']['value'] = 32
+        report, _ = self.run_rows(rows)
+        self.assertEqual(report['storage_live_bytes']['core:0/shared'], 16)
+        self.assertEqual(report['storage_peak_bytes']['core:0/shared'], 32)
+        self.assertFalse(any(e['action'] == 'free' and e['version'] == ['shared', 'v0']
+                             for e in report['storage_events']))
+        self.c['parameters']['shared_capacity']['value'] = 16
+        with self.assertRaisesRegex(ModelError, 'Deadlock.*capacity:core:0/shared') as caught:
+            self.run_rows(rows)
+        reg = json.loads(str(caught.exception).split(': ', 1)[1])['components']['core:0/tile']
+        self.assertIn(['shared', 'v0'], reg['active'])
+        self.assertNotIn(['shared', 'v2'], reg['active'])
+
+    def test_shared_read_old_write_new_requires_two_allocations(self):
+        source = op(0, outputs=[tile(0, 0, shared=True)])
+        update = self.shared_use(op(1, inputs=source['outputs'], name='tile.add',
+            outputs=[dict(tile(1, 1, shared=True), storage_id=0)]), 'v0')
+        self.c['parameters']['shared_capacity']['value'] = 16
+        with self.assertRaisesRegex(ModelError, 'Deadlock.*capacity:core:0/shared'):
+            self.run_rows([source, update])
+        self.c['parameters']['shared_capacity']['value'] = 32
+        report, rows = self.run_rows([source, update])
+        self.assertGreater(rows[1]['issue'], rows[0]['complete'])
+        self.assertEqual(report['storage_peak_bytes']['core:0/shared'], 32)
+        self.assertFalse(any('superseded_by' in e for e in report['storage_events']))
+
+    def test_distinct_shared_versions_on_different_threads_need_no_order_edge(self):
+        rows = [op(0, outputs=[tile(0, 0, shared=True)]),
+                op(1, pe=1, outputs=[dict(tile(1, 1, shared=True), storage_id=0)])]
+        report, timeline = self.run_rows(rows)
+        trace = TraceAdapter(self.path, self.c)
+        self.assertEqual(trace.instructions[1].deps, set())
+        self.assertEqual(timeline[0]['allocated'], timeline[1]['allocated'])
+        self.assertEqual(report['storage_peak_bytes']['core:0/shared'], 32)
+
+    def test_mixed_pool_outputs_fail_atomically_without_releasing_old_version(self):
+        fixture(self.path, [op(0, outputs=[tile(0, 0, shared=True)]),
+            op(1, outputs=[dict(tile(1, 1, shared=True), storage_id=0), tile(2, 1)])])
+        trace = TraceAdapter(self.path, self.c)
+        for pool in ('local', 'shared'):
+            with self.subTest(pool=pool):
+                self.c['parameters']['shared_capacity']['value'] = 16 if pool == 'shared' else 32
+                self.c['parameters']['local_capacity']['value'] = 8 if pool == 'local' else 16
+                reg = TileReg('core:0/tile', trace.instructions, trace.versions, self.c)
+                reg.receive('allocation', Allocate(0, 'old'))
+                reg.tick(0)
+                reg.drain_outputs()
+                before = dict(reg.usage), list(reg.storage_events), set(reg.active)
+                reg.receive('allocation', Allocate(1, 'pair'))
+                reg.tick(1)
+                self.assertEqual(reg.drain_outputs(), [])
+                self.assertEqual((dict(reg.usage), reg.storage_events, reg.active), before)
+                self.c['parameters']['shared_capacity']['value'] = 32
+                self.c['parameters']['local_capacity']['value'] = 16
+                reg.tick(2)
+                self.assertEqual([m.request for _, _, m in reg.drain_outputs()], ['pair'])
+                self.assertEqual(reg.usage['core:0/shared'], 32)
+                self.assertEqual(reg.usage['core:0/pe:0/local'], 16)
+
     def test_reserve_before_data_ready_then_execute_out_of_order(self):
         self.c['engines']['exp'].update(throughput=1, latency=100)
         slow = op(0, name='tile.exp')

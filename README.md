@@ -86,7 +86,7 @@ Simulator 将指令派给 Cube、Vector、TLSU，各单元内部实现自己的�
 
 `parameters.rob_depth.value` 限制每线程已准入、尚未退休的指令数：正整数为有限容量，`null` 为无限，默认及旧配置缺省为 `null`。普通 tile 指令和 view 都占槽位；barrier/task 控制节点由 Sync 管理，不计窗口容量。ROB 每周期先处理完成和按序退休，再按程序顺序填补空位，准入和退休宽度均无限。完成但尚未退休的指令仍占槽位。Scheduler 收到 Admitted 后按线程顺序申请输出，不等待数据 ready；任务依赖和 barrier 仍限制预留。TileReg 同线程分配受阻时不让年轻申请抢占容量，其他线程可继续推进。同拍可连续分配多条指令，完成预留后按数据和同步依赖乱序派发。
 
-Local 每个 `(storage_id, version)` 独立计费，新旧版本可共存；读旧写新保留 RAW 依赖且需要两份空间，view/reshape 别名不重复分配。Local 在生产者及全部消费者完成后释放，这是粗粒度近似，尚未完整对齐 SSM 的退休和提前释放机制。Shared 生命周期及 Comm submit 接收预留、wait 避免重复分配的规则保持不变。提前预留可减少依赖链上的分配消息等待，也可能增加峰值占用；新版本独立计费还会增加读旧写新的容量需求。capture v2 / SSNPU v1 和公开 API 无需变更。
+Local 和 Shared 统一按动态版本独立分配、计费：Local 使用 `(storage_id, version)`，Shared 使用 `shared_version`，同一 storage 的新旧版本可共存。读旧写新保留 RAW 依赖且需要两份空间，view/reshape 别名不重复分配。容量不足时等待，不做原地复用或旧版本容量抵扣。Local 在生产者及全部消费者完成后释放；Shared 继续按 `last-use/reuse` 决定回收，仍需保留的版本作为 live-out 占用容量。Comm submit 预留接收输出，wait 避免重复分配。该生命周期是粗粒度近似，尚未完整对齐 SSM 的退休、提前释放和容量不足时原地复用机制。提前预留和版本共存可能增加峰值占用。capture v2 / SSNPU v1 和公开 API 无需变更。
 
 报告 `rob_windows[ROB组件名][线程身份]` 给出 capacity、occupancy、peak、full_cycles；最后一项统计每周期退休和补入后，窗口满且仍有指令待准入的周期数。正常完成时 occupancy 为 0。等待原因包含 waiting_admission；死锁快照的 windows 包含窗口内指令、retirement_head 和 next_admission。实验配置与无限、4、16 深度的 matmul/FA 回放产物放在上级 `workspace/rob-depth/`。
 
