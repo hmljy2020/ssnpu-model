@@ -149,6 +149,16 @@ class CoreAdapterTests(unittest.TestCase):
             self.assertEqual(submit['complete'], submit['accepted'])
             self.assertLess(submit['complete'], submit['source_read_complete'])
             self.assertLess(submit['source_read_complete'], wait['complete'])
+            # Submit reserves the receive before source readiness; wait's own
+            # Allocate can now arrive in the same tick and must be a no-op.
+            self.assertEqual(submit['allocated'], wait['allocated'])
+            self.assertLess(submit['allocated'], submit['complete'])
+            entry = next(e for e in self.plan['phases'][0]['nodes'] if e['core'] == node)
+            target = ['shared', entry['target']['shared_version']]
+            allocations = [e for e in report['storage_events']
+                           if e['action'] == 'allocate' and e['version'] == target]
+            self.assertEqual(len(allocations), 1)
+            self.assertLess(allocations[0]['cycle'], submit['issue'])
         installed = json.dumps(report['communication_installation'])
         self.assertNotIn('produce0', installed)
         self.assertNotIn('SharedTileReg', installed)

@@ -91,7 +91,7 @@ class TraceAdapter:
         self.instructions[i.id] = i
 
     def _versions(self, real):
-        # 先把 view 解析到同一存储版本，再建立生产者、全部消费者及固定位置覆写约束。
+        # view 解析到同一版本；Local 动态版本独立，只有 Shared 保留固定位置约束。
         # 这些是静态元数据；运行时的 allocated/ready/释放状态由 TileReg 独立维护。
         aliases = {}
         for i in real:
@@ -119,7 +119,7 @@ class TraceAdapter:
                 if o['memory_space'] not in ('SharedTileReg', 'LocalTileReg'):
                     raise ModelError(f'Unsupported tile memory: {o["memory_space"]}')
                 pool = f'core:{i.core}/shared' if shared else f'core:{i.core}/pe:{i.pe}/local'
-                slot = (pool, o.get('storage_id', o['object_id']))
+                slot = (pool, o.get('storage_id', o['object_id'])) if shared else (pool, key)
                 if key in self.versions:
                     raise ModelError(f'Duplicate version producer: {key}')
                 self.versions[key] = Version(key, o, i.id, pool, slot, nbytes(o, o['shape']), retained=shared)
@@ -177,8 +177,9 @@ class TraceAdapter:
                         raise ModelError(f'Read after last-use or unordered lifetime: {key}')
         slots = defaultdict(list)
         for v in self.versions.values():
-            slots[v.slot].append(v)
-        # Fixed locations cannot be overwritten until all old readers finish.
+            if v.pool.endswith('/shared'):
+                slots[v.slot].append(v)
+        # Shared fixed locations cannot be overwritten until all old readers finish.
         # The overwriting instruction may itself read the old version in-place.
         for versions in slots.values():
             versions.sort(key=lambda v: (self.instructions[v.producer].task,

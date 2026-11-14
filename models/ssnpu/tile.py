@@ -60,11 +60,12 @@ class TileReg(Component):
         # Submit reserves the wait producer's output; wait must not allocate it twice.
         if instruction.raw['ir_op'] == 'comm.wait' and instruction.outputs <= self.active:
             return None
-        # 先计算全部输出所需容量和可替换旧版本，所有检查通过后才修改状态（原子预留）。
+        # Local 每个动态版本独立占容量；仅 Shared 保留固定位置替换规则。
+        # 全部输出检查通过后才修改状态，失败不释放旧版本或部分预留。
         delta, replace = Counter(), set()
         for key in sorted(instruction.outputs, key=str):
             v = self.versions[key]
-            for old in sorted(self.active, key=str):
+            for old in sorted(self.active, key=str) if v.pool.endswith('/shared') else ():
                 ov = self.versions[old]
                 if ov.slot == v.slot and old != key:
                     # 固定槽位覆写必须等旧生产者和其他读者完成。
@@ -221,17 +222,24 @@ class TileReg(Component):
             if end <= cycle:
                 self.respond(request)
                 self.running.remove((request, end))
-        # 3. 尝试各输出分配请求；容量不足时留在队列，允许后续可满足的请求继续尝试。
+        # 3. 同线程按序分配，受阻后禁止年轻申请抢占；其他线程仍可推进。
+        # 同拍可连续满足多个请求，不增加逐条消息往返的吞吐限制。
         self.blocked = {}
-        for request in list(self.allocations):
+        blocked_threads = {}
+        for request in sorted(self.allocations, key=lambda r: (self.nodes[r.instruction].task,
+                                                               self.nodes[r.instruction].age,
+                                                               str(r.instruction))):
             i = self.nodes[request.instruction]
-            reason = self.allocate(i)
+            thread = i.raw['_identity']
+            reason = (f'waiting_prior_allocation:{blocked_threads[thread]}' if thread in blocked_threads
+                      else self.allocate(i))
             if reason:
+                blocked_threads.setdefault(thread, i.id)
                 self.blocked[str(i.id)] = reason
                 self.waits[str(i.id)][reason] += 1
                 continue
             # TileReg → Scheduler：Allocated 携带原请求 ID，允许该指令进入待派发状态。
-            # 原地写指令随后仍可读取保留的旧版本 ready；新输出要等实际写回才 ready。
+            # 预留不发布 ready；Scheduler 仍须等待数据和同步依赖。
             self.send(core_name(i.core, 'scheduler'), Allocated(i.id, request.request), 'allocation')
             self.allocations.remove(request)
         # 4. 按确定性交付顺序仲裁访问；未 ready 的读请求可被绕过，读写端口彼此独立。

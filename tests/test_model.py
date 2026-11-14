@@ -122,6 +122,7 @@ def audit(report, trace):
             assert rows[version.producer]['complete'] <= e['cycle']
             for reader in version.consumers:
                 if rows[reader]['complete'] > e['cycle']:
+                    assert version.pool.endswith('/shared')
                     assert e.get('superseded_by') == reader
                     assert rows[reader]['allocation_request'] < e['cycle'] < rows[reader]['issue']
                     assert any(trace.versions[k].slot == version.slot for k in trace.instructions[reader].outputs)
@@ -147,6 +148,13 @@ def audit(report, trace):
         ordered = sorted(thread, key=lambda i: i.age)
         assert all(rows[a.id]['retire'] <= rows[b.id]['retire'] for a, b in zip(ordered, ordered[1:]))
         assert all(rows[a.id]['admitted'] <= rows[b.id]['admitted'] for a, b in zip(ordered, ordered[1:]))
+        reservations = [i for i in ordered if not i.alias]
+        assert all(rows[a.id]['allocation_request'] <= rows[b.id]['allocation_request']
+                   for a, b in zip(reservations, reservations[1:]))
+        assert all(rows[a.id]['allocated'] <= rows[b.id]['allocated']
+                   for a, b in zip(reservations, reservations[1:]))
+        for i in reservations:
+            assert all(rows[d]['complete'] + 2 <= rows[i.id]['allocation_request'] for d in i.sync)
         changes, admissions = Counter(), Counter()
         for i in ordered:
             changes[rows[i.id]['admitted']] += 1
@@ -200,9 +208,11 @@ class ModelTests(ModelTestCase):
         d = op(2, inputs=a['outputs'], name='tile.add')
         _, t = self.run_rows([a, b, d])
         # Admit 0->1, allocate 1->2->3, dispatch 3->4, compute [4,5)+2, write 7->8->9.
-        self.assertEqual([t[k]['issue'] for k in (0, 1, 2)], [3, 3, 13])
-        self.assertEqual([t[k]['compute_start'] for k in (0, 1, 2)], [4, 5, 16])
-        self.assertEqual(t[2]['complete'], 21)
+        self.assertEqual([t[k]['issue'] for k in (0, 1)], [3, 3])
+        self.assertLess(t[2]['allocated'], t[0]['complete'])
+        self.assertEqual(t[2]['issue'], t[0]['complete'] + 2)
+        self.assertEqual(t[2]['compute_start'], t[2]['issue'] + 3)
+        self.assertEqual(t[2]['complete'], t[2]['compute_start'] + 5)
 
     def test_ooo_bypass(self):
         slow = op(0, outputs=[tile(0, 0, (1, 40))])
@@ -211,7 +221,7 @@ class ModelTests(ModelTestCase):
         _, t = self.run_rows([slow, blocked, ready])
         self.assertEqual(t[2]['issue'], 3)
         self.assertEqual(t[2]['compute_start'], 14)
-        self.assertEqual(t[1]['issue'], 22)
+        self.assertEqual(t[1]['issue'], t[0]['complete'] + 2)
 
     def test_width_and_determinism(self):
         rows = [op(p, pe=p) for p in range(4)]
@@ -277,15 +287,22 @@ class ModelTests(ModelTestCase):
         self.assertEqual(t[1]['issue'], 11)
         self.assertTrue(any('capacity:' in reason for reason in r['wait_reason_sets']['1']))
 
-    def test_fixed_overwrite_waits_readers_and_allows_inplace(self):
+    def test_local_read_old_write_new_keeps_both_versions(self):
         a = op(0)
         b = op(1, inputs=a['outputs'], name='tile.exp')
         c = op(2, inputs=a['outputs'], outputs=[tile(0, 2, version=2)], name='tile.add')
-        _, t = self.run_rows([a, b, c])
-        self.assertGreaterEqual(t[2]['issue'], t[1]['complete'])
+        self.c['engines']['exp']['latency'] = 100
+        report, t = self.run_rows([a, b, c])
+        self.assertLess(t[2]['issue'], t[1]['complete'])
+        self.assertEqual(t[2]['issue'], t[0]['complete'] + 2)
+        self.assertEqual(report['storage_peak_bytes']['core:0/pe:0/local'], 48)
         self.c['parameters']['local_capacity']['value'] = 16
-        _, t = self.run_rows([a, c])
-        self.assertEqual(t[2]['issue'], t[0]['complete'] + 4)
+        with self.assertRaisesRegex(ModelError, 'Deadlock.*capacity:'):
+            self.run_rows([a, c])
+        self.c['parameters']['local_capacity']['value'] = 32
+        report, _ = self.run_rows([a, c])
+        self.assertEqual(report['storage_peak_bytes']['core:0/pe:0/local'], 32)
+        self.assertFalse(any('superseded_by' in e for e in report['storage_events']))
 
     def test_empty_phases_and_tail_barrier(self):
         self.c['parameters']['barrier_latency']['value'] = 2
@@ -387,7 +404,9 @@ class AdditionalTests(ModelTestCase):
                    outputs=[tile(10*p+2, 10*p+2, (2, 5))], name='tile.matmul')
             rows.extend([a, b, c])
         _, t = self.run_rows(rows)
-        self.assertEqual({t[p*10+2]['issue'] for p in range(4)}, {18})
+        for p in range(4):
+            self.assertLess(t[p*10+2]['allocated'], t[p*10+1]['complete'])
+            self.assertEqual(t[p*10+2]['issue'], max(t[p*10]['complete'], t[p*10+1]['complete']) + 2)
         self.assertEqual({t[p*10+2]['stages'][0]['work'] for p in range(4)}, {30})
 
     def test_memory_path_override(self):

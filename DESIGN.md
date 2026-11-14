@@ -45,7 +45,9 @@ ROB 在加载时按 `_identity` 和 `age` 建立线程条目。每周期先处�
 
 WSE 配置的计算吞吐按整核计量：FP16 Cube 为 4096 MAC/cycle/核，Vector 与转换路径以 256 B/cycle/核为预算。当前采用固定等分模型，每个 PE 得到整核预算的 `1/pe_count`，空闲份额不借给其他 PE；这是建模假设。Vector 按操作数据类型把字节预算换算为元素吞吐，exp/reduce 还受配置中的合成操作吞吐约束。通用 `default_config()` 保留原来的每 PE 合成参数。上述预算不包含真实阵列的小矩阵利用率校准。
 
-Scheduler 从 waiting_admission 开始，收到 Admitted 后进入 waiting_dependencies；确认数据和同步依赖后，只发送一次输出分配请求。TileReg 原子分配所有输出或保留请求等待；已保留容量在等待发射时继续占用。收到成功响应后，Scheduler 按 PE 间轮转、PE 内最老就绪顺序发射，成功派发才消耗 PE/Core 额度。资源繁忙由执行组件排队处理，不阻止 Scheduler 派发其他命令。
+Scheduler 从 waiting_admission 开始，收到 Admitted 后进入 waiting_allocation；按线程程序顺序只发送一次输出分配请求，不等待数据输入 ready。任务依赖和 barrier 等同步边仍限制跨阶段预留；同步受阻的指令也阻止本线程后续申请。请求可以同拍连续发送，无须等前一条 Allocated 往返。TileReg 按线程顺序原子分配全部输出：受阻请求留在队列，其线程后续请求等待，其他线程继续推进，同拍可连续满足多个请求。
+
+收到 Allocated 后，Scheduler 仍检查数据和同步依赖，再按 PE 间轮转、PE 内最老就绪顺序发射。预留容量在等待依赖或发射时继续占用；年轻独立指令完成预留后可绕过等待数据的老指令。成功派发才消耗 PE/Core 额度，资源繁忙由执行组件排队处理。view 不申请新容量，派发仍等待真实输入。Comm submit 继续预留 wait 的接收输出，同拍到达的 wait 分配请求也不会重复计费。
 
 Cube / Vector / TLSU 顺序请求每个 tile 输入，包括私有输入；无 tile 输入的命令可在接收周期进入计算。等待输入或结果的旧命令不阻塞其他就绪命令。就绪命令按 `(task, age, id)` 仲裁，各组件独立推进自己的服务。exp、cast、reduce 与逐元素计算共享该 PE 的 Vector 资源。
 
@@ -65,9 +67,11 @@ result = service_end + latency
 
 TileReg 是唯一可修改版本 ready、容量和消费者完成状态的组件。版本的完整消费者在加载时预先确定；普通版本在生产完成且所有消费者完成后释放，无消费者的输出在生产完成消息到达时释放。没有活跃读取请求并不等于可以释放。shared last-use 必须覆盖参与者并等待所有其他消费者；只有 reuse 的共享版本作为 live-out 保留。
 
-固定位置后续写入必须等待旧生产者和其他读者完成。原位操作可以读取被自己替代的旧版本：分配时将旧版本的容量所有权转给新版本，旧内容仍可通过旧版本标识读取，随后才写入新结果。对应 free 事件带 `superseded_by`，表示容量所有权转移；不代表原位读取已经结束。该机制避免原位操作双倍计费。所有输出分配失败时不占据任何部分输出。
+普通 Local 输出以 `(storage_id, version)` 为独立分配身份，同一 storage 的新旧版本可同时占用完整容量。适配器不再仅因 storage_id 相同增加覆盖依赖。读旧写新保留 RAW 依赖，输入旧版本和输出新版本分别计费；容量不足必须等待，不能提前扣除仍在使用的旧版本。view/reshape 链规范化到源版本，不重复分配。多输出预留保持原子性，失败不占据任何部分输出，也不释放旧版本。
 
-适配器继续拒绝无序固定位置写、非法 last-use / reuse、别名环、缺失生产者和图环。跨线程同 phase 的固定位置写必须有显式顺序，shared handle 本身不强制复用物理 storage_id。
+Local 的释放规则是粗粒度近似：生产者和全部消费者完成后回收，不等待 ROB 退休，也没有完整对齐 SSM 的退休和提前释放机制。issue #6 的 `A=full; B=relu(A); C=full; B=add(B,C)`，每 tile 为 1 KiB 时最后一步需要旧 B、C、新 B 三份空间；3 KiB 可完成，2 KiB 的容量不足不能通过隐式原地覆盖掩盖。
+
+Shared 保留发布、消费和释放规则。其固定位置后续写入仍等待旧生产者和其他读者，读旧写新的替换仍可产生带 `superseded_by` 的容量转移事件。适配器继续拒绝无序 Shared 固定位置写、非法 last-use / reuse、别名环、缺失生产者和图环。跨线程同 phase 的 Shared 固定位置写必须有显式顺序，shared handle 本身不强制复用物理 storage_id。
 
 ## 报告与停滞
 
@@ -77,7 +81,7 @@ TileReg 是唯一可修改版本 ready、容量和消费者完成状态的组件
 
 ROB 准入记录 admitted，Scheduler 下一拍记录 admission_received；窗口外指令只能等待准入，不能申请输出或派发。ROB 收到 Complete 时记录 rob_complete，早于或等于 retire。报告的 instruction_events 将各组件实际记录的里程碑打点按周期输出，CLI 的 --event-log 可另存 JSONL。每行携带指令身份、执行单元与记录事件的组件，画流水图可直接配对 issue / rob_complete；细分阶段可使用 compute_start/end 与 writeback_start/end。消息延迟固定为一周期，因此 rob_complete=complete+1，而退休可因同线程更老指令未完成而延后。
 
-设置配置顶层 `"message_log": true` 输出 messages，默认关闭。每条日志包含 type、instruction、source、destination、port、sent、received，以及该消息的请求/版本等字段。资源利用率只计算服务时间，不包含消息延迟。wait_reason_sets 统计等待指令周期，TileReg 容量等待和 Scheduler 等待可重叠，不可直接相加；内部计算资源等待另列。
+设置配置顶层 `"message_log": true` 输出 messages，默认关闭。每条日志包含 type、instruction、source、destination、port、sent、received，以及该消息的请求/版本等字段。资源利用率只计算服务时间，不包含消息延迟。wait_reason_sets 统计等待指令周期：waiting_prior_allocation 指明前序分配阻塞，capacity 指明容量池，dependency 表示等待数据，synchronization 表示等待同步，issue_width 仅在已预留且依赖就绪时表示等待发射额度。allocation_pending 包含请求/应答在途及 TileReg 排队时间，具体阻塞查看 TileReg 的 blocked；Scheduler 快照的 reasons 同时列出本地等待原因。TileReg 容量等待和 Scheduler 等待可重叠，不可直接相加；内部计算资源等待另列。
 
 没有消息在途、没有内部未来服务结果且一个周期没有进展时，Simulator 抛出 ModelError，包含所有组件快照：分配/访问请求、队列、依赖、在途结果、占用版本、消费者及具体容量阻塞。`Simulator.snapshot()` 也可主动调用。完成报告包含组件最终快照。ROB 的 windows 显示窗口内指令、退休头 retirement_head 和下一条待准入 next_admission。报告 rob_windows 按组件及线程列出容量 capacity、当前 occupancy、峰值 peak 和 full_cycles；full_cycles 在每拍退休、补入后统计窗口满且仍有待准入指令的周期数。
 
@@ -88,20 +92,20 @@ ROB 准入记录 admitted，Scheduler 下一拍记录 admission_received；窗�
 ```text
 ROB --Admitted(load)--> Scheduler
 Scheduler --Allocate(A)--> TileReg --Allocated--> Scheduler
+Scheduler [matmul 已准入] --Allocate(C)--> TileReg --Allocated--> Scheduler
+Scheduler [store 已准入] --Allocate(无 tile 输出)--> TileReg --Allocated--> Scheduler
 Scheduler --Issued(load)--> ROB
 Scheduler --Dispatch(load)--> TLSU
 TLSU [memory service + latency] --Access(write A)--> TileReg
 TileReg --AccessDone--> TLSU --Complete(load)--> ROB --Completed--> Scheduler/Sync
                           \--Consumed(load)--> TileReg
-Scheduler [matmul 依赖就绪] --Allocate(C)--> TileReg --Allocated--> Scheduler
-Scheduler --Dispatch(matmul)--> Cube
+Scheduler [matmul 依赖就绪] --Dispatch(matmul)--> Cube
 Cube --Access(read A)--> TileReg --AccessDone--> Cube
 Cube --Access(read B)--> TileReg --AccessDone--> Cube
 Cube [cube service + latency] --Access(write C)--> TileReg --AccessDone--> Cube
 Cube --Complete(matmul)--> ROB --Completed--> Scheduler/Sync
      \--Consumed(matmul)--> TileReg [检查 A/B 释放]
-Scheduler --Allocate(无 tile 输出)--> TileReg --Allocated--> Scheduler
-Scheduler --Dispatch(store)--> TLSU --Access(read C)--> TileReg --AccessDone--> TLSU
+Scheduler [store 依赖就绪] --Dispatch(store)--> TLSU --Access(read C)--> TileReg --AccessDone--> TLSU
 TLSU [memory write service + latency] --Complete(store)--> ROB
                                     \--Consumed(store)--> TileReg [检查 C 释放]
 ```

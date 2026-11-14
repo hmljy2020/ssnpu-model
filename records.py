@@ -29,7 +29,7 @@ class Instruction:
 
 @dataclass
 class Version:
-    """逻辑版本与存储身份：pool 决定容量域，slot 决定是否与旧版本争用固定位置。
+    """pool 决定容量域；Local slot 包含动态版本，Shared slot 保留固定位置语义。
 
     consumers 包含完整 trace 的消费者；retained 为真时消费结束仍保留载荷。
     """
