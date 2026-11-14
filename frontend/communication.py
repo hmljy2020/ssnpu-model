@@ -3,6 +3,7 @@
 The tree/row-column construction is migrated from tilesim_wse 3445e99;
 capture bindings live here; routing and Calendar compilation live in models.noc.
 """
+from config import platform_spec
 import copy
 import hashlib
 import json
@@ -14,7 +15,7 @@ from tiles import nbytes, version_key
 
 
 from models.noc.routing import integer, node_id, neighbors, route_bitmap, route_tree, multicast_routes, transmissions
-from models.noc.protocol import CommRequest, DataRange, digest, platform_spec
+from runtime.communication import CommRequest, DataRange, digest
 from dataclasses import asdict
 from models.noc.compiler import compile_phase as compile_routes, make_installation
 

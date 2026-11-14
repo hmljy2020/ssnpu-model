@@ -12,7 +12,7 @@ from fractions import Fraction
 
 from errors import ModelError
 from models.noc.routing import receive_offset, route_tree, transmissions
-from models.noc.protocol import (CommRequest, Accepted, Rejected, Completion, DataCommand, DataReply, digest)
+from runtime.communication import (CommRequest, Accepted, Rejected, Completion, DataCommand, DataReply, digest)
 from runtime.component import Component
 
 
